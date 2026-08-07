@@ -55,7 +55,6 @@ obj-y += irq/
 obj-y += rcu/
 obj-y += livepatch/
 obj-y += dma/
-obj-y += ksu/
 
 
 #ifdef CONFIG_OPLUS_SECURE_GUARD
