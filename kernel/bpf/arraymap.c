@@ -366,6 +366,9 @@ static void percpu_array_map_seq_show_elem(struct bpf_map *map, void *key,
 	void __percpu *pptr;
 	int cpu;
 
+	if (!map->btf)
+		return;
+
 	rcu_read_lock();
 
 	seq_printf(m, "%u: {\n", *(u32 *)key);
@@ -558,6 +561,9 @@ static void prog_array_map_seq_show_elem(struct bpf_map *map, void *key,
 {
 	void **elem, *ptr;
 	u32 prog_id;
+
+	if (!map->btf)
+		return;
 
 	rcu_read_lock();
 

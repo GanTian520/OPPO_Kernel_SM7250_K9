@@ -1303,6 +1303,9 @@ static void htab_percpu_map_seq_show_elem(struct bpf_map *map, void *key,
 	void __percpu *pptr;
 	int cpu;
 
+	if (!map->btf)
+		return;
+
 	rcu_read_lock();
 
 	l = __htab_map_lookup_elem(map, key);
