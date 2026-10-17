@@ -1124,6 +1124,9 @@ static void __bpf_prog_put_rcu(struct rcu_head *rcu)
 
 static void __bpf_prog_put(struct bpf_prog *prog, bool do_idr_lock)
 {
+	if (!prog)
+		return;
+
 	if (atomic_dec_and_test(&prog->aux->refcnt)) {
 		/* bpf_prog_free_id() must be called first */
 		bpf_prog_free_id(prog, do_idr_lock);
@@ -1135,6 +1138,11 @@ static void __bpf_prog_put(struct bpf_prog *prog, bool do_idr_lock)
 
 void bpf_prog_put(struct bpf_prog *prog)
 {
+	/* cgroup detach and async cleanup paths can legitimately race with a
+	 * stale program pointer. Keep the release path tolerant to NULL so the
+	 * lifetime tracking stays consistent instead of dereferencing a freed
+	 * program during teardown.
+	 */
 	__bpf_prog_put(prog, true);
 }
 EXPORT_SYMBOL_GPL(bpf_prog_put);

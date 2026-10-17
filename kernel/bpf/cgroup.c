@@ -32,10 +32,21 @@ void cgroup_bpf_put(struct cgroup *cgrp)
 		struct bpf_prog_list *pl, *tmp;
 
 		list_for_each_entry_safe(pl, tmp, progs, node) {
+			struct bpf_prog *prog = pl->prog;
+			struct bpf_cgroup_storage *storage = pl->storage;
+
 			list_del(&pl->node);
-			bpf_prog_put(pl->prog);
-			bpf_cgroup_storage_unlink(pl->storage);
-			bpf_cgroup_storage_free(pl->storage);
+			if (!prog) {
+				if (storage)
+					bpf_cgroup_storage_free(storage);
+				kfree(pl);
+				continue;
+			}
+			bpf_prog_put(prog);
+			if (storage) {
+				bpf_cgroup_storage_unlink(storage);
+				bpf_cgroup_storage_free(storage);
+			}
 			kfree(pl);
 			static_branch_dec(&cgroup_bpf_enabled_key);
 		}
@@ -316,9 +327,13 @@ int __cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
 cleanup:
 	/* and cleanup the prog list */
 	pl->prog = old_prog;
-	bpf_cgroup_storage_free(pl->storage);
+	if (pl->storage && pl->storage != old_storage) {
+		bpf_cgroup_storage_free(pl->storage);
+		pl->storage = NULL;
+	}
 	pl->storage = old_storage;
-	bpf_cgroup_storage_link(old_storage, cgrp, type);
+	if (old_storage)
+		bpf_cgroup_storage_link(old_storage, cgrp, type);
 	if (pl_was_allocated) {
 		list_del(&pl->node);
 		kfree(pl);
@@ -385,14 +400,17 @@ int __cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
 
 	/* now can actually delete it from this cgroup list */
 	list_del(&pl->node);
-	bpf_cgroup_storage_unlink(pl->storage);
-	bpf_cgroup_storage_free(pl->storage);
+	if (pl->storage) {
+		bpf_cgroup_storage_unlink(pl->storage);
+		bpf_cgroup_storage_free(pl->storage);
+	}
 	kfree(pl);
 	if (list_empty(progs))
 		/* last program was detached, reset flags to zero */
 		cgrp->bpf.flags[type] = 0;
 
-	bpf_prog_put(old_prog);
+	if (old_prog)
+		bpf_prog_put(old_prog);
 	static_branch_dec(&cgroup_bpf_enabled_key);
 	return 0;
 
@@ -438,7 +456,11 @@ int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 
 		i = 0;
 		list_for_each_entry(pl, progs, node) {
-			id = pl->prog->aux->id;
+			struct bpf_prog *prog = pl->prog;
+
+			if (!prog)
+				continue;
+			id = prog->aux->id;
 			if (copy_to_user(prog_ids + i, &id, sizeof(id)))
 				return -EFAULT;
 			if (++i == cnt)

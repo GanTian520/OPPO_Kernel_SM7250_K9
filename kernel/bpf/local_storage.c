@@ -357,7 +357,11 @@ void bpf_cgroup_storage_link(struct bpf_cgroup_storage *storage,
 	map = storage->map;
 
 	spin_lock_bh(&map->lock);
-	WARN_ON(cgroup_storage_insert(map, storage));
+	if (cgroup_storage_insert(map, storage)) {
+		WARN_ON_ONCE(1);
+		spin_unlock_bh(&map->lock);
+		return;
+	}
 	list_add(&storage->list, &map->list);
 	spin_unlock_bh(&map->lock);
 }
@@ -367,16 +371,18 @@ void bpf_cgroup_storage_unlink(struct bpf_cgroup_storage *storage)
 	struct bpf_cgroup_storage_map *map;
 	struct rb_root *root;
 
-	if (!storage)
+	if (!storage || !storage->map)
 		return;
 
 	map = storage->map;
 
 	spin_lock_bh(&map->lock);
 	root = &map->root;
-	rb_erase(&storage->node, root);
-
-	list_del(&storage->list);
+	if (storage->node.rb_left || storage->node.rb_right ||
+	    rb_parent(&storage->node))
+		rb_erase(&storage->node, root);
+	if (!list_empty_careful(&storage->list))
+		list_del_init(&storage->list);
 	spin_unlock_bh(&map->lock);
 }
 
