@@ -189,6 +189,7 @@ struct bpf_call_arg_meta {
 	int regno;
 	int access_size;
 	u64 msize_max_value;
+	int ref_obj_id;
 };
 
 static DEFINE_MUTEX(bpf_verifier_lock);
@@ -249,6 +250,18 @@ static bool type_is_pkt_pointer(enum bpf_reg_type type)
 	       type == PTR_TO_PACKET_META;
 }
 
+static bool type_is_sk_pointer(enum bpf_reg_type type)
+{
+	return type == PTR_TO_SOCKET ||
+	       type == PTR_TO_SOCKET_OR_NULL;
+}
+
+static bool reg_type_may_be_refcounted_or_null(enum bpf_reg_type type)
+{
+	return type == PTR_TO_SOCKET ||
+	       type == PTR_TO_SOCKET_OR_NULL;
+}
+
 /* string representation of 'enum bpf_reg_type' */
 static const char * const reg_type_str[] = {
 	[NOT_INIT]		= "?",
@@ -261,6 +274,8 @@ static const char * const reg_type_str[] = {
 	[PTR_TO_PACKET]		= "pkt",
 	[PTR_TO_PACKET_META]	= "pkt_meta",
 	[PTR_TO_PACKET_END]	= "pkt_end",
+	[PTR_TO_SOCKET]		= "sock",
+	[PTR_TO_SOCKET_OR_NULL]	= "sock_or_null",
 };
 
 static void print_liveness(struct bpf_verifier_env *env,
@@ -307,6 +322,8 @@ static void print_verifier_state(struct bpf_verifier_env *env,
 				verbose(env, ",call_%d", func(env, reg)->callsite);
 		} else {
 			verbose(env, "(id=%d", reg->id);
+			if (reg_type_may_be_refcounted_or_null(t))
+				verbose(env, ",ref_obj_id=%d", reg->ref_obj_id);
 			if (t != SCALAR_VALUE)
 				verbose(env, ",off=%d", reg->off);
 			if (type_is_pkt_pointer(t))
@@ -359,7 +376,114 @@ static void print_verifier_state(struct bpf_verifier_env *env,
 		if (state->stack[i].slot_type[0] == STACK_ZERO)
 			verbose(env, " fp%d=0", (-i - 1) * BPF_REG_SIZE);
 	}
+	if (state->acquired_refs && state->refs[0].id) {
+		verbose(env, " refs=%d", state->refs[0].id);
+		for (i = 1; i < state->acquired_refs; i++)
+			if (state->refs[i].id)
+				verbose(env, ",%d", state->refs[i].id);
+	}
 	verbose(env, "\n");
+}
+
+static int copy_reference_state(struct bpf_func_state *dst,
+			       const struct bpf_func_state *src)
+{
+	if (!src->refs)
+		return 0;
+	if (WARN_ON_ONCE(dst->acquired_refs < src->acquired_refs)) {
+		memset(dst, 0, sizeof(*dst));
+		return -EFAULT;
+	}
+	memcpy(dst->refs, src->refs,
+	       sizeof(*src->refs) * src->acquired_refs);
+	return 0;
+}
+
+static int realloc_reference_state(struct bpf_func_state *state, int size,
+				 bool copy_old)
+{
+	int old_size = state->acquired_refs;
+	struct bpf_reference_state *new_refs;
+
+	if (size <= old_size || !size) {
+		if (copy_old)
+			return 0;
+		state->acquired_refs = size;
+		if (!size && old_size) {
+			kfree(state->refs);
+			state->refs = NULL;
+		}
+		return 0;
+	}
+	new_refs = kmalloc_array(size, sizeof(*new_refs), GFP_KERNEL);
+	if (!new_refs)
+		return -ENOMEM;
+	if (copy_old) {
+		if (state->refs)
+			memcpy(new_refs, state->refs,
+			       sizeof(*new_refs) * old_size);
+		memset(new_refs + old_size, 0,
+		       sizeof(*new_refs) * (size - old_size));
+	}
+	state->acquired_refs = size;
+	kfree(state->refs);
+	state->refs = new_refs;
+	return 0;
+}
+
+static int acquire_reference_state(struct bpf_func_state *state, int ref_obj_id,
+					 int insn_idx)
+{
+	int i;
+
+	if (!state)
+		return -EINVAL;
+	if (ref_obj_id <= 0)
+		return 0;
+	for (i = 0; i < state->acquired_refs; i++) {
+		if (state->refs && state->refs[i].id == ref_obj_id)
+			return 0;
+	}
+	if (!state->refs) {
+		int err = realloc_reference_state(state, 1, false);
+
+		if (err)
+			return err;
+	}
+	for (i = 0; i < state->acquired_refs; i++) {
+		if (!state->refs[i].id) {
+			state->refs[i].id = ref_obj_id;
+			state->refs[i].insn_idx = insn_idx;
+			return 0;
+		}
+	}
+	return -ENOSPC;
+}
+
+static void release_reference_state(struct bpf_func_state *state,
+					 int ref_obj_id)
+{
+	int i;
+
+	if (!state || !state->refs)
+		return;
+	for (i = 0; i < state->acquired_refs; i++) {
+		if (state->refs[i].id == ref_obj_id) {
+			state->refs[i].id = 0;
+			state->refs[i].insn_idx = 0;
+			return;
+		}
+	}
+}
+
+static void release_reference(struct bpf_reg_state *reg,
+				  struct bpf_func_state *state)
+{
+	if (!state || !reg || !reg->ref_obj_id)
+		return;
+	release_reference_state(state, reg->ref_obj_id);
+	reg->ref_obj_id = 0;
+	reg->id = 0;
 }
 
 static int copy_stack_state(struct bpf_func_state *dst,
@@ -422,6 +546,7 @@ static void free_func_state(struct bpf_func_state *state)
 {
 	if (!state)
 		return;
+	kfree(state->refs);
 	kfree(state->stack);
 	kfree(state);
 }
@@ -450,7 +575,13 @@ static int copy_func_state(struct bpf_func_state *dst,
 	err = realloc_func_state(dst, src->allocated_stack, false);
 	if (err)
 		return err;
+	err = realloc_reference_state(dst, src->acquired_refs, false);
+	if (err)
+		return err;
 	memcpy(dst, src, offsetof(struct bpf_func_state, allocated_stack));
+	err = copy_reference_state(dst, src);
+	if (err)
+		return err;
 	return copy_stack_state(dst, src);
 }
 
@@ -689,12 +820,15 @@ static void __mark_reg_unknown(struct bpf_reg_state *reg)
 {
 	/*
 	 * Clear type, id, off, and union(map_ptr, range) and
-	 * padding between 'type' and union
+	 * padding between 'type' and union.  Socket/object reference
+	 * tracking must also be reset so stale refs are not carried
+	 * forward after a register is re-used.
 	 */
 	memset(reg, 0, offsetof(struct bpf_reg_state, var_off));
 	reg->type = SCALAR_VALUE;
 	reg->var_off = tnum_unknown;
 	reg->frameno = 0;
+	reg->ref_obj_id = 0;
 	__mark_reg_unbounded(reg);
 }
 
@@ -714,6 +848,8 @@ static void mark_reg_unknown(struct bpf_verifier_env *env,
 static void __mark_reg_not_init(struct bpf_reg_state *reg)
 {
 	__mark_reg_unknown(reg);
+	reg->id = 0;
+	reg->ref_obj_id = 0;
 	reg->type = NOT_INIT;
 }
 
@@ -2147,6 +2283,7 @@ static int check_map_func_compatibility(struct bpf_verifier_env *env,
 			goto error;
 		break;
 	case BPF_MAP_TYPE_CGROUP_STORAGE:
+	case BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE:
 		if (func_id != BPF_FUNC_get_local_storage)
 			goto error;
 		break;
@@ -2237,7 +2374,8 @@ static int check_map_func_compatibility(struct bpf_verifier_env *env,
 			goto error;
 		break;
 	case BPF_FUNC_get_local_storage:
-		if (map->map_type != BPF_MAP_TYPE_CGROUP_STORAGE)
+		if (map->map_type != BPF_MAP_TYPE_CGROUP_STORAGE &&
+		    map->map_type != BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE)
 			goto error;
 		break;
 	case BPF_FUNC_sk_select_reuseport:
@@ -5424,6 +5562,12 @@ static int check_map_prog_compatibility(struct bpf_verifier_env *env,
 	return 0;
 }
 
+static bool bpf_map_is_cgroup_storage(struct bpf_map *map)
+{
+	return (map->map_type == BPF_MAP_TYPE_CGROUP_STORAGE ||
+		map->map_type == BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE);
+}
+
 /* look for pseudo eBPF instructions that access map FDs and
  * replace them with actual map pointers
  */
@@ -5514,10 +5658,9 @@ static int replace_map_fd_with_map_ptr(struct bpf_verifier_env *env)
 			}
 			env->used_maps[env->used_map_cnt++] = map;
 
-			if (map->map_type == BPF_MAP_TYPE_CGROUP_STORAGE &&
+			if (bpf_map_is_cgroup_storage(map) &&
 			    bpf_cgroup_storage_assign(env->prog, map)) {
-				verbose(env,
-					"only one cgroup storage is allowed\n");
+				verbose(env, "only one cgroup storage of each type is allowed\n");
 				fdput(f);
 				return -EBUSY;
 			}
@@ -5546,11 +5689,15 @@ next_insn:
 /* drop refcnt of maps used by the rejected program */
 static void release_maps(struct bpf_verifier_env *env)
 {
+	enum bpf_cgroup_storage_type stype;
 	int i;
 
-	if (env->prog->aux->cgroup_storage)
+	for_each_cgroup_storage_type(stype) {
+		if (!env->prog->aux->cgroup_storage[stype])
+			continue;
 		bpf_cgroup_storage_release(env->prog,
-					   env->prog->aux->cgroup_storage);
+			env->prog->aux->cgroup_storage[stype]);
+	}
 
 	for (i = 0; i < env->used_map_cnt; i++)
 		bpf_map_put(env->used_maps[i]);
