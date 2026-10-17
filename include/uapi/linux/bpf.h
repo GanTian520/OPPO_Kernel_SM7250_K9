@@ -26,6 +26,12 @@ struct seq_file;
 struct btf_type;
 
 /* map is generic key/value storage optionally accesible by eBPF programs */
+
+struct bpf_cgroup_storage_key {
+	__u64 cgroup_inode_id;	/* cgroup inode id */
+	__u32 attach_type;	/* program attach type */
+};
+
 struct bpf_map_ops {
 	/* funcs callable from userspace (via syscall) */
 	int (*map_alloc_check)(union bpf_attr *attr);
