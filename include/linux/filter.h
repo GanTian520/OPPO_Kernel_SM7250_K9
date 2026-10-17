@@ -731,12 +731,28 @@ bpf_ctx_narrow_access_ok(u32 off, u32 size, u32 size_default)
 
 static inline void bpf_prog_lock_ro(struct bpf_prog *fp)
 {
+	/*
+	 * A JITed BPF program has its instruction pages prepared by the arch JIT
+	 * and should not be forced back to read-only text pages here.  The
+	 * interpreter-backed path still needs the legacy ro-locking, but JITed
+	 * payloads must keep their executable layout intact.  This keeps the
+	 * 4.19 behavior compatible with newer upstream stability fixes without
+	 * changing the program lifecycle semantics for non-JIT programs.
+	 */
+	if (fp->jited)
+		return;
+
 	fp->undo_set_mem = 1;
 	set_memory_ro((unsigned long)fp, fp->pages);
 }
 
 static inline void bpf_prog_unlock_ro(struct bpf_prog *fp)
 {
+	if (fp->jited) {
+		fp->undo_set_mem = 0;
+		return;
+	}
+
 	if (fp->undo_set_mem)
 		set_memory_rw((unsigned long)fp, fp->pages);
 }
