@@ -37,7 +37,7 @@ static int bpf_test_run(struct bpf_prog *prog, void *ctx, u32 repeat,
 	preempt_disable();
 	time_start = ktime_get_ns();
 	for (i = 0; i < repeat; i++) {
-		bpf_cgroup_storage_set(storage);   
+		bpf_cgroup_storage_set(storage);
 
 		*retval = BPF_PROG_RUN(prog, ctx);
 
@@ -145,7 +145,13 @@ int bpf_prog_test_run_skb(struct bpf_prog *prog, const union bpf_attr *kattr,
 		__skb_push(skb, hh_len);
 	if (is_direct_pkt_access)
 		bpf_compute_data_pointers(skb);
-	retval = bpf_test_run(prog, skb, repeat, &duration);
+
+	ret = bpf_test_run(prog, skb, repeat, &retval, &duration);
+	if (ret) {
+		kfree_skb(skb);
+		return ret;
+	}
+
 	if (!is_l2) {
 		if (skb_headroom(skb) < hh_len) {
 			int nhead = HH_DATA_ALIGN(hh_len - skb_headroom(skb));
@@ -190,7 +196,12 @@ int bpf_prog_test_run_xdp(struct bpf_prog *prog, const union bpf_attr *kattr,
 	rxqueue = __netif_get_rx_queue(current->nsproxy->net_ns->loopback_dev, 0);
 	xdp.rxq = &rxqueue->xdp_rxq;
 
-	retval = bpf_test_run(prog, &xdp, repeat, &duration);
+	ret = bpf_test_run(prog, &xdp, repeat, &retval, &duration);
+	if (ret) {
+		kfree(data);
+		return ret;
+	}
+
 	if (xdp.data != data + XDP_PACKET_HEADROOM + NET_IP_ALIGN ||
 	    xdp.data_end != xdp.data + size)
 		size = xdp.data_end - xdp.data;
