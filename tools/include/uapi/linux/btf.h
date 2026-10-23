@@ -64,8 +64,16 @@ struct btf_type {
 #define BTF_KIND_VOLATILE	9	/* Volatile	*/
 #define BTF_KIND_CONST		10	/* Const	*/
 #define BTF_KIND_RESTRICT	11	/* Restrict	*/
-#define BTF_KIND_MAX		11
-#define NR_BTF_KINDS		12
+#define BTF_KIND_FUNC		12	/* Function	*/
+#define BTF_KIND_FUNC_PROTO	13	/* Function prototype */
+#define BTF_KIND_VAR		14	/* Variable	*/
+#define BTF_KIND_DATASEC		15	/* Data section */
+#define BTF_KIND_FLOAT		16	/* Floating point */
+#define BTF_KIND_DECL_TAG		17	/* Decl tag	*/
+#define BTF_KIND_TYPE_TAG		18	/* Type tag	*/
+#define BTF_KIND_ENUM64		19	/* Enumeration with 64-bit values */
+#define BTF_KIND_MAX		19
+#define NR_BTF_KINDS		20
 
 /* For some specific BTF_KIND, "struct btf_type" is immediately
  * followed by extra data.
@@ -92,11 +100,40 @@ struct btf_enum {
 	__s32	val;
 };
 
+struct btf_enum64 {
+	__u32	name_off;
+	__u32	val_lo32;
+	__u32	val_hi32;
+};
+
 /* BTF_KIND_ARRAY is followed by one "struct btf_array" */
 struct btf_array {
 	__u32	type;
 	__u32	index_type;
 	__u32	nelems;
+};
+
+struct btf_param {
+	__u32	name_off;
+	__u32	type;
+};
+
+struct btf_var {
+	__u32	name_off;
+	__u32	type;
+	__u32	linkage;
+};
+
+struct btf_var_secinfo {
+	__u32	type;
+	__u32	offset;
+	__u32	size;
+};
+
+struct btf_decl_tag {
+	__u32	name_off;
+	__u32	type;
+	__u32	component_idx;
 };
 
 /* BTF_KIND_STRUCT and BTF_KIND_UNION are followed
