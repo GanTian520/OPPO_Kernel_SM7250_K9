@@ -1683,9 +1683,11 @@ static struct ctl_table kern_table[] = {
 		.data		= &sysctl_unprivileged_bpf_disabled,
 		.maxlen		= sizeof(sysctl_unprivileged_bpf_disabled),
 		.mode		= 0644,
-		/* only handle a transition from default "0" to "1" */
+		/* Android 16 / netbpfload expects to write 0 (enabled) or 1 (disabled).
+		 * Restricting this to 1 only causes EINVAL on the write('0') path.
+		 */
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= &one,
+		.extra1		= &zero,
 		.extra2		= &one,
 	},
 #endif
